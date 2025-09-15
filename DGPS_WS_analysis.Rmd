@@ -1,0 +1,520 @@
+---
+title: "Codebook for DGPS workshop on Bayesian staitstics and EMA"
+output: html_notebook
+author: "christoph Bamberg"
+---
+
+The first part corresponds to the models and graphs shown on the slides. At some point we switch from the slides to the code here directly.
+At the end there is a small exercise.
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(brms)
+library(dplyr)
+library(emmeans)
+library(tidybayes)
+theme_ppt <- function(base_size = 20, base_family = "") {
+  theme_minimal(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      panel.grid.major = element_line(colour = "grey85", size = 0.4),
+      panel.grid.minor = element_blank(),
+      axis.line        = element_line(size = 0.6, colour = "black"),
+      axis.ticks       = element_line(size = 0.4, colour = "black"),
+      axis.title       = element_text(size = rel(1.2), face = "bold"),
+      axis.text        = element_text(size = rel(1.1)),
+      legend.position  = "bottom",
+      legend.title     = element_text(face = "bold", size = rel(1.1)),
+      legend.text      = element_text(size = rel(1)),
+      legend.key       = element_blank(),
+      plot.title       = element_text(size = rel(1.4), face = "bold", hjust = 0),
+      plot.subtitle    = element_text(size = rel(1.2), hjust = 0),
+      plot.caption     = element_text(size = rel(0.9), colour = "grey50", hjust = 1),
+      strip.text       = element_text(size = rel(1.1), face = "bold")
+    )
+}
+
+```
+load fuction for simulation
+```{r}
+source("DGPS_WS_simulate_EMA_data.R")
+?sim_EMA_data
+```
+
+simulate data
+```{r}
+d=sim_EMA_data()
+d
+```
+
+# data exploration
+- distribution of data
+- fitting likelihood functions
+```{r}
+d_ = pivot_longer(d,c(negative_mood,positive_mood))
+ggplot(d_,aes(x=value,fill=name))+geom_density(size=2,alpha=0.6)+xlim(0,100)+theme_ppt()
+ggplot(d,aes(x=phys_activity,fill=T))+geom_density(size=2,alpha=0.6,fill="yellow")+xlim(0,100)+theme_ppt()
+ggplot(d,aes(x=with_others))+geom_bar(stat="count",size=2,alpha=0.6,fill="green")+theme_ppt()
+```
+
+# frequentist MLM as a benchmark/comparison
+
+# fitting linear regression
+## finding priors
+```{r}
+#simple linear regression
+get_prior(negative_mood ~ phys_activity,
+           data=d)
+```
+```{r}
+# multi-level random slope & intercept model
+get_prior(negative_mood ~ phys_activity + with_others + (1 + phys_activity + with_others|id/day),
+           data=d)
+```
+exploring options for standard deviation
+```{r}
+n <- 1000
+scale <- 5
+x <- abs(rcauchy(n, location = 0, scale = scale))
+plot(density(x),xlim=c(0,200))
+
+n <- 1000
+scales <- c(1, 5, 10, 50)
+# simulate data and compute densities for different scale values
+df <- lapply(scales, function(s) {
+  x <- abs(rcauchy(n, location = 0, scale = s))
+  d <- density(x, from = 0, to = 50)
+  data.frame(x = d$x, y = d$y, scale = factor(s))
+}) %>% bind_rows()
+
+# plot
+ggplot(df, aes(x = x, y = y, colour = scale)) +
+  geom_line(size = 1) +
+  labs(x = "x", y = "Density", colour = "Scale") +
+  theme_minimal(base_size = 16)
+
+```
+
+fitting model just with prior and plotting draws from the prior distribution against the data
+```{r}
+prior_bm1 = c(prior(normal(50, 10), class = "Intercept"),
+              prior(normal(0, 5),  class = "b"),
+              prior(cauchy(0,5), class = "sigma"))
+bm1_prior <- brm(
+  negative_mood ~ phys_activity,
+  data = d,
+  family = gaussian(),
+  prior = prior_bm1,
+  sample_prior = "only",   # only sampling from prior
+  iter = 2000, chains = 4, seed = 123,
+  file="bm1_prior",file_refit="on_change")
+summary(bm1_prior)
+
+p = brms::pp_check(bm1_prior,ndraws=50)
+p + theme_ppt()+xlim(-100,150)
+```
+looks fine
+
+
+## fitting model
+```{r}
+bm1<- brm(
+  negative_mood ~ phys_activity,
+  data = d,
+  family = gaussian(),
+  prior = prior_bm1, #priors from above
+  iter = 2000, chains = 4, #could first fit with iter = 2 to test whether compilation is fine
+  seed = 123,
+  file="bm1",file_refit="on_change")
+```
+
+### diagnostics
+```{r}
+summary(bm1)
+#look at R-hat and ESS
+```
+
+```{r}
+plot(bm1)
+```
+
+### summary of draws
+here for 90% credible interval
+```{r}
+summary(bm1, prob=0.9)
+```
+
+### displaying the posterior
+```{r}
+#getting each of the 4000 draws as a dataframe for each sampled parameter
+coeffs_bm1 = as.data.frame(bm1)
+
+# posterior densitiy plots:
+ggplot(aes(x = b_Intercept), data = coeffs_bm1) +
+    geom_density(fill = "green",color = "green", alpha = 0.7) +  
+  geom_point(y = 0, x = mean(coeffs_bm1$b_Intercept)) +
+  labs(x = "Intercept", y = element_blank()) +theme_ppt()
+
+ggplot(aes(x = b_phys_activity), data = coeffs_bm1) +
+    geom_density(fill = "blue",color = "blue", alpha = 0.7) +  
+  geom_point(y = 0, x = mean(coeffs_bm1$b_phys_activity)) +
+  geom_vline(xintercept=0,lty=3,lwd=1.5)+
+  labs(x = "Coefficient phys. activity", y = element_blank()) +theme_ppt()
+
+```
+
+posterior predictive plot
+```{r}
+pp_check(bm1, type = "dens_overlay", ndraws = 20) +
+  ggtitle("posterior predictive vs. observed")+theme_ppt()
+```
+posterior prediction at specific value
+```{r}
+#creating new dataframe just for physical activity over 50
+newdat=tibble(phys_activity = seq(50, 100, length.out = 50))
+head(newdat)
+#get posterior predictions
+#first option: considering residual error in the whole model
+pred_pop = posterior_predict(bm1, newdata = newdat)
+plot(density(pred_pop))
+# second option: only uncertainty in the expected value of the posterior prediciton considered, not residual model error
+pred_pop = posterior_epred(bm1, newdata = newdat)
+plot(density(pred_pop))
+```
+
+# -----------------------------------------
+
+# Multi-level models
+```{r}
+d
+```
+
+## finding priors
+```{r}
+get_prior(negative_mood ~ phys_activity + with_others + (1 + phys_activity + with_others|id),
+          family=gaussian(), #is default 
+           data=d)
+
+prior_bm2 = c(prior(normal(50,10), class = Intercept),
+            prior(normal(0,5), class = b),
+            prior(cauchy(0,5), class = sigma),
+            prior(cauchy(0,5), class = sd),
+            prior(lkj_corr_cholesky(1), class = cor))
+```
+
+## specifying model
+here, just testing the compilation and whether the summary is as expected
+```{r}
+bm2i = brm(negative_mood ~ phys_activity + with_others + (1 + phys_activity + with_others|id),
+          prior=prior_bm2,
+          data=d,
+          chains=1,iter=2,
+          file="bm2i",file_refit="on_change")
+summary(bm2i)
+```
+structure as expected in the random effects
+
+## fitting
+```{r}
+bm2 = update(bm2i,
+             chains=4,iter=2000,
+             file="bm2",file_refit="on_change")
+#note how it doesn't need to recompile the model since it updates on bm2i
+```
+### diagnostics
+```{r}
+summary(bm2,prob=0.86)
+```
+
+```{r}
+plot(bm2)
+#two pages of plots
+
+#easier to plot specific variables
+plot(bm2,variable = "sd_id__with_others")
+```
+### posterior prediction
+for 2 individuals
+```{r}
+nd =d %>% 
+  filter(id %in% c(10,2)) %>% 
+  select(id, phys_activity, negative_mood,with_others)
+
+bm2_preds = bind_cols(
+  # fitted, i.e., the data that the model fit to
+  fitted(bm2, newdata = nd,probs = c(0.05, 0.95)) %>% 
+    data.frame(),
+  # predict, the posterior prediction 
+  predict(bm2, newdata = nd,probs = c(0.05, 0.95)) %>% 
+    data.frame() %>%
+    #some renaming:
+    select(Q5:Q95) %>% 
+    setNames(c("p_lower", "p_upper"))) %>% 
+  bind_cols(nd) 
+  
+ggplot(data=bm2_preds,aes(x = phys_activity)) +
+  geom_smooth(aes(y = Estimate, ymin = Q5, ymax = Q95),
+              stat = "identity", alpha = 1/2, linewidth = 1/2) +
+  geom_ribbon(aes(ymin = p_lower, ymax = p_upper),alpha = 1/2) +
+  geom_point(aes(y = negative_mood),alpha=0.6) +
+  ylab("negaitve mood") + xlab("physical activity")+
+  scale_y_continuous(breaks = seq(0, 100, 20))+
+  facet_wrap(~ id)+theme_minimal()
+```
+
+for a new individual, informed by variance in random effects
+```{r}
+bm2_epred = bm2 %>% 
+    emmeans(~ phys_activity + with_others ,
+            at = list(phys_activity = seq(0,100,5),
+                      with_others = c(0,1),
+                      id = "IDX"),
+            epred = TRUE, re_formula = ~ (1 + phys_activity + with_others|id), 
+            allow_new_levels = TRUE, sample_new_levels = "uncertainty") %>% 
+    gather_emmeans_draws()
+```
+
+```{r}
+ggplot(bm2_epred, aes(x = phys_activity, y = .value, group = factor(with_others),
+                      colour = factor(with_others), fill = factor(with_others))) +
+  geom_smooth(method = "lm", se = TRUE, size = 1, alpha = 0.3) + theme_minimal()
+```
+
+# Bonus: zero-inflated beta model
+research question: how is positive affect associated with physical activity
+
+data preparation: we will use a beta distribution, which needs the response values to be between 0 and 1.
+```{r}
+#scaling to between 0 and 1
+d$phys_activity01 = d$phys_activity/100
+
+# changing 1s to 0.999
+d$phys_activity01 = ifelse(d$phys_activity01==1, 0.999, d$phys_activity01)
+```
+
+## exploration
+```{r}
+ggplot(d,aes(x=phys_activity,fill=T))+geom_histogram(size=2,alpha=0.6,fill="yellow")+theme_ppt()
+ggplot(d,aes(x=phys_activity01,fill=T))+geom_histogram(size=2,alpha=0.4,fill="yellow")+theme_ppt()
+```
+We see a lot of zeros, which we can model with a zero-inflation component. This adds probability mass at 0 to the target of the sampling algorithm. 
+Considering the underlying data-generating process, this distribution can also be justified.
+
+```{r}
+#look at the implementation of zero-inflated beta:
+?brmsfamily
+#zero_inflated_beta(link = "logit", link_phi = "log", link_zi = "logit")
+```
+
+## finding priors
+```{r}
+get_prior(phys_activity ~ positive_mood + (1 + positive_mood|id),
+           zi ~ 1 + (1|id),
+          family=zero_inflated_beta(),
+          data=d)
+```
+
+for the mean of physical activity (excluding the zero-inflated share), we may expect it to be at 0.5, in the middle. We need to transform this mentally to the logit-scale, since that is the link function that links our data to the model. inverse-logit of 0.5 is 0. 
+
+For the zero-inflation part it might be easier to think in probabilities. Assume you expect 40% of responses to be excess zeros.qlogis(0.3) transforms this to the logistic scale.
+```{r}
+plogis(0)
+#same
+#inv_logit_scaled(0)
+
+# Define a sequence of logit-scale values
+x = seq(-6, 6, length.out = 1000)
+
+# Define different priors for the intercept
+priors = list(
+  "Normal(0, 1.5)"  = dnorm(x, mean = 0, sd = 1.5),
+  "Normal(0, 1)"   = dnorm(x, mean = 0, sd = 1),
+  "Normal(0, 0.5)" = dnorm(x, mean = 0, sd = 0.5),
+  "Normal(logit(0.3), 1)" = dnorm(x, mean = qlogis(0.3), sd = 1)
+)
+
+# Convert to data frame for ggplot
+df = do.call(rbind, lapply(names(priors), function(name) {
+  data.frame(
+    x = x,
+    density = priors[[name]],
+    prior = name)}))
+
+# Plot densities on logit scale
+p1 = ggplot(df, aes(x = x, y = density, colour = prior)) +
+  geom_line(size = 1) +
+  labs(x = "Intercept (logit scale)", y = "Density",
+       title = "Prior Distributions on Logit Scale") +
+  theme_minimal()
+
+# Also plot transformed probabilities
+df$prob = plogis(df$x)
+
+p2 = ggplot(df, aes(x = prob, y = density, colour = prior)) +
+  geom_line(size = 1) +
+  labs(x = "Intercept (probability scale)", y = "Density",
+       title = "Prior Distributions on Probability Scale") +
+  theme_minimal()
+
+p1
+p2
+
+```
+
+```{r}
+priors_zi_beta = c(
+          # Intercept  and coefficients on logit-scale -> use same prior as for logistic regression
+          prior(normal(0,1),class=Intercept),
+          prior(normal(0,1),class=b), 
+          # precision phi on log-scale, difficult to have intuition for that -> use flat defaults
+          #prior(gamma(0.01, 0.01),class=phi),
+          # zero inflation part
+          prior(normal(logit(0.3), 1), class =  zi),
+          #random effects covariance
+          prior(student_t(3, 0, 2.5),class=sd),
+          prior(lkj_corr_cholesky(1), class = cor))
+```
+
+### testing the priors
+with the rescaled response variable
+```{r}
+bm3_prior <- brm(
+            phys_activity01 ~ positive_mood + (1 + positive_mood|id),
+            zi ~ 1 + (1|id),
+    family=zero_inflated_beta(),
+    data=d,
+    prior = priors_zi_beta,
+    sample_prior = "only",   # only sampling from prior
+    iter = 2000, chains = 4, seed = 123,
+    file="bm3_prior",file_refit="on_change")
+summary(bm3_prior)
+
+plot(bm3_prior)
+```
+```{r}
+#example of problematic chains:
+plot(bm3_prior,variable = "phi")
+```
+trying again with prior for phi too
+```{r}
+x = seq(0, 50, length.out = 1000)
+y = dgamma(x, shape = 2, rate = 0.1)
+
+ggplot(data.frame(x, y), aes(x, y)) +
+  geom_line(size = 1) +
+  labs(title = "gamma(0.1, 0.1) prior for phi",
+       x = "phi", y = "Density") +
+  theme_minimal()
+
+priors_zi_beta2 = c(
+          # Intercept and coefficients on logit-scale -> use same prior as for logistic regression
+          prior(normal(0,1),class=Intercept),
+          prior(normal(0,1),class=b), 
+          # precision phi on log-scale, difficult to have intuition for that -> use flat defaults
+          prior(gamma(2, 0.01),class=phi),
+          # zero inflation part
+          prior(normal(logit(0.3), 1), class =  zi),
+          #random effects covariance
+          prior(student_t(3, 0, 2.5),class=sd),
+          prior(lkj_corr_cholesky(1), class = cor))
+```
+
+```{r}
+bm3_prior2 <- brm(
+            phys_activity01 ~ positive_mood + (1 + positive_mood|id),
+            zi ~ 1 + (1|id),
+    family=zero_inflated_beta(),
+    data=d,
+    prior = priors_zi_beta2,
+    sample_prior = "only",   # only sampling from prior
+    iter = 2000, chains = 4, seed = 123,
+    file="bm3_prior2",file_refit="on_change")
+
+
+plot(bm3_prior2,variable = "phi")
+```
+much better mixing of chains
+
+## fitting
+```{r}
+bm3 <- update(bm3_prior2,
+    iter = 2000, chains = 4, seed = 123,
+    file="bm3",file_refit="on_change")
+summary(bm3)
+```
+
+```{r}
+plot(bm3)
+```
+
+
+# ----------------------------------------------------------------------------
+
+# EXERCISE
+# logistic regression
+research question: are participants more likely to be with others later in the day?  
+The model: with_others ~ 1 + prompt + (1 + prompt | id) _If you want to add random effects. Feel free to leave them out or add another factor. Maybe try solving the exercise first without random effects and then adding them later._
+
+## data exploration
+```{r}
+# e.g.
+#ggplot(d, aes(x=with_others,fill=factor(prompt)))+geom_bar()+theme_ppt()
+```
+
+Note: For the logistic regression, use the likelihood function bernoulli() in the family argument. A bernoulli process is drawing either 0 or 1 only once, which is what we need for the logistic regression.
+See the documentation under bernoulli:
+```{r}
+?brmsfamily
+```
+Note the link function used there.
+
+## finding priors
+(you can reuse the priors from the logit-part of the zero_inflated_beta regression above)
+```{r}
+get_prior( ...,
+           family = ...,
+           data = d)
+
+
+priors_logit = c(
+      prior = ...,
+      prior = ...
+                )
+```
+
+### testing the priors
+```{r}
+bm4_prior = brm( ...,
+           family = ...,
+           prior = priors_logit,
+          data = d,
+          sample_prior = "only",   # only sampling from prior
+          iter = 1000, chains = 4, seed = 123,
+          file="bm4_prior",file_refit="on_change")
+
+plot(bm4_prior)
+
+pp_check(bm4_prior)
+```
+
+## fitting the model
+```{r}
+#update bm4_prior, removing the sample_prior line, changing the file name, adapting the iterations
+```
+
+## diagnostics
+```{r}
+# look at Rhat and ESS
+#look at the chains
+```
+
+
+## interpret
+```{r}
+#look at the summary output, remember that it's on the log-odds scale.
+# use exp() if you want to transform values to the odds scale
+```
+
+
+# ----------------------------------------------------------------------------
+# END
